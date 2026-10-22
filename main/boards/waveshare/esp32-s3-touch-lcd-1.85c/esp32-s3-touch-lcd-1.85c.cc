@@ -9,6 +9,9 @@
 
 #ifdef CONFIG_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C_HOME
 #include "home_display.h"
+#include <esp_lcd_touch_cst816s.h>
+#include <esp_lvgl_port.h>
+#include <lvgl.h>
 #endif
 
 #include <esp_log.h>
@@ -221,6 +224,9 @@ private:
     i2c_master_bus_handle_t i2c_bus_;
     esp_io_expander_handle_t io_expander = NULL;
     LcdDisplay* display_;
+#ifdef CONFIG_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C_HOME
+    esp_lcd_touch_handle_t tp_ = nullptr;
+#endif
 
     void InitializeI2c() {
         // Initialize I2C peripheral
@@ -363,6 +369,51 @@ private:
 #endif
     }
 
+#ifdef CONFIG_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C_HOME
+    // 触摸接入（仅 home 变体）：复用 I2C0 总线（TCA9554 同总线）挂 CST816S，
+    // 经 esp_lvgl_port 注册为 LVGL 输入设备（与固件的 LVGL 任务协作，勿手搓
+    // lv_indev）。TP_RST 已由 InitializeTca9554()（EXIO1 复位）拉起，故 rst 设
+    // NC；int 设 NC 走轮询（同 1.83/4B/7C 先例）。
+    // 必须在 Initializest77916Display() 之后调用：lv_display_get_default() 依赖
+    // 已完成 lvgl_port_init()/lvgl_port_add_disp()。
+    void InitializeTouch() {
+        // 注：ESP_LCD_TOUCH_IO_I2C_CST816S_CONFIG() 宏的指定初始化项顺序与该 IDF 版本
+        // 的 esp_lcd_panel_io_i2c_config_t 声明顺序不一致，C++ 严格定序下报
+        // "designator order ... does not match declaration order"。故照 1.83 先例用
+        // = {} + 逐字段赋值（字段与取值同宏：dev_addr=0x15、400k、control_phase_bytes=1、
+        // dc_bit_offset=0、lcd_cmd_bits=8、lcd_param_bits=0、disable_control_phase=1）。
+        esp_lcd_panel_io_handle_t tp_io_handle = nullptr;
+        esp_lcd_panel_io_i2c_config_t tp_io_config = {};
+        tp_io_config.dev_addr = ESP_LCD_TOUCH_IO_I2C_CST816S_ADDRESS;
+        tp_io_config.scl_speed_hz = 400 * 1000;
+        tp_io_config.control_phase_bytes = 1;
+        tp_io_config.dc_bit_offset = 0;
+        tp_io_config.lcd_cmd_bits = 8;
+        tp_io_config.lcd_param_bits = 0;
+        tp_io_config.flags.disable_control_phase = 1;
+        ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(i2c_bus_, &tp_io_config, &tp_io_handle));
+
+        // 触摸坐标的 swap/mirror 及方向待真机验证（先按不 swap 试，反向再调 flags）。
+        esp_lcd_touch_config_t tp_cfg = {
+            .x_max = DISPLAY_WIDTH - 1,
+            .y_max = DISPLAY_HEIGHT - 1,
+            .rst_gpio_num = GPIO_NUM_NC,  // TP_RST 已由 TCA9554 EXIO1 复位
+            .int_gpio_num = GPIO_NUM_NC,  // 轮询模式
+            .levels = {0, 0},
+            .flags = {0, 0, 0},  // swap_xy/mirror_x/mirror_y 全 0，待真机校准
+        };
+        ESP_LOGI(TAG, "Initialize touch controller");
+        ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_cst816s(tp_io_handle, &tp_cfg, &tp_));
+
+        lvgl_port_touch_cfg_t touch_cfg = {
+            .disp = lv_display_get_default(),
+            .handle = tp_,
+        };
+        lvgl_port_add_touch(&touch_cfg);
+        ESP_LOGI(TAG, "Touch panel initialized successfully");
+    }
+#endif
+
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
@@ -381,6 +432,9 @@ public:
         InitializeTca9554();
         InitializeSpi();
         Initializest77916Display();
+#ifdef CONFIG_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C_HOME
+        InitializeTouch();
+#endif
         InitializeButtons();
         GetBacklight()->RestoreBrightness();
     }
