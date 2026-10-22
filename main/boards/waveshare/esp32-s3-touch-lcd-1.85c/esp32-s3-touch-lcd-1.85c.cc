@@ -7,6 +7,10 @@
 #include "button.h"
 #include "config.h"
 
+#ifdef CONFIG_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C_HOME
+#include "home_display.h"
+#endif
+
 #include <esp_log.h>
 #include "i2c_device.h"
 #include <driver/i2c_master.h>
@@ -350,8 +354,13 @@ private:
         esp_lcd_panel_swap_xy(panel, DISPLAY_SWAP_XY);
         esp_lcd_panel_mirror(panel, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
 
+#ifdef CONFIG_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C_HOME
+        display_ = new HomeLcdDisplay(panel_io, panel,
+                                      DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
+#else
         display_ = new SpiLcdDisplay(panel_io, panel,
-                                    DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
+                                     DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
+#endif
     }
 
     void InitializeButtons() {

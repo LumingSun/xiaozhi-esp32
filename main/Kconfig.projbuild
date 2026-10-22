@@ -903,6 +903,11 @@ choice DISPLAY_ESP32S3_TOUCH_LCD_1_85C
         bool "version 2.0"
 endchoice
 
+config WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C_HOME
+    bool "ESP32-S3-Touch-LCD-1.85C home variant (touch UI)"
+    depends on BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C
+    default n
+
 
 choice DISPLAY_STYLE
     prompt "Select display style"
