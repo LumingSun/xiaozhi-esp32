@@ -21,3 +21,15 @@ python3 scripts/build.py waveshare/esp32-s3-touch-lcd-1.85c --name esp32-s3-touc
 
 注意：`--name esp32-s3-touch-lcd-1.85c-home` 会作为 OTA 上报的 `board.name`
 （全局唯一）；自建服务端按设备 MAC 识别，新 name 属预期。
+
+## home 变体信息屏天气城市
+
+信息屏天气走 `wttr.in`（纯 HTTP）。默认城市 `Shanghai`，改成实际居住地：
+
+```bash
+xzmenu   # -> ESP32-S3-Touch-LCD-1.85C home variant (touch UI)
+         #   -> Weather city for info screen (wttr.in)
+```
+
+wttr.in 支持拼音/英文城市名（如 `Beijing`、`Shenzhen`）。天气描述用
+`weatherCode→中文` 映射（wttr.in 的 `?lang=zh` 不本地化 weatherDesc）。

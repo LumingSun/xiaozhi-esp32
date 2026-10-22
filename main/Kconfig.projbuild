@@ -908,6 +908,15 @@ config WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C_HOME
     depends on BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C
     default n
 
+config WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C_HOME_CITY
+    string "Weather city for info screen (wttr.in)"
+    depends on WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C_HOME
+    default "Shanghai"
+    help
+        City used by the home info-screen weather widget. wttr.in accepts
+        pinyin or English city names (e.g. Shanghai, Beijing, Shenzhen).
+        Set this to your actual location.
+
 
 choice DISPLAY_STYLE
     prompt "Select display style"
