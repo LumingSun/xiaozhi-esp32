@@ -82,6 +82,15 @@ private:
     lv_timer_t* state_timer_ = nullptr;
     esp_timer_handle_t value_fade_timer_ = nullptr;
 
+    // 字体对象的所有权持有者。
+    // LVGL 样式只存裸 lv_font_t*，而 Assets::Apply() 会调用 SetTextFont() 换主题字体，
+    // 期间 LvglDisplay::SetTextFont 在重绑完主题样式后会释放旧字体对象。信息屏标签用的是
+    // 局部样式（不在重绑范围），旧对象一释放指针就悬空，布局刷新时
+    // lv_font_get_glyph_width 调到空函数指针 → 整机重启。
+    // 这两个 shared_ptr 让旧字体活到本对象析构，彻底消除悬空。
+    std::shared_ptr<LvglFont> info_text_font_;
+    std::shared_ptr<LvglFont> info_icon_font_;
+
     // 信息屏 UI（info_container_ 覆盖在基础 UI 之上，Active/ScreenOff 时隐藏）
     lv_obj_t* info_container_ = nullptr;
     lv_obj_t* main_info_box_ = nullptr;

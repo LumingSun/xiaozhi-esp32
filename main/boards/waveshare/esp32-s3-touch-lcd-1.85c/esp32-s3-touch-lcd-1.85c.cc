@@ -422,6 +422,14 @@ private:
             return;
         }
 
+        // 触摸芯片数据寄存器读持续 NACK（每次启动数百次，寄存器 0x02），触摸不可用。
+        // 已排除：int 引脚配置（NC/GPIO4 都试过）、I2C 总线共享、上电复位时序
+        //（TCA9554 EXIO1 已正确复位，且芯片 ID 0xB5 能读到）。疑似本板触摸面板硬件问题。
+        // 暂不注册输入设备：避免 140 次/秒的失败 I2C 事务刷屏并浪费 CPU。
+        // 触摸恢复后删掉下面两行即可（自建容错 indev 的代码仍在）。
+        ESP_LOGW(TAG, "touch controller unresponsive (I2C NACK), touch disabled");
+        return;
+
         // 自建容错输入设备，替代 lvgl_port_add_touch：
         // 后者内部的 lvgl_port_touchpad_read 用 ESP_ERROR_CHECK(esp_lcd_touch_read_data(...))，
         // 一次 I2C NACK 就让整机 abort。这里读失败只当作"本次无触摸"，绝不拖垮整机；
@@ -439,11 +447,9 @@ private:
             }
             esp_err_t ret = esp_lcd_touch_read_data(tp);
             if (ret != ESP_OK) {
-                vTaskDelay(pdMS_TO_TICKS(2));  // 让出总线，重试一次
-                ret = esp_lcd_touch_read_data(tp);
-            }
-            if (ret != ESP_OK) {
-                return;  // I2C 持续异常：本次当作无触摸，不 abort
+                // I2C 持续异常：本次当作无触摸，不 abort。
+                // 注意：绝不能在这里 vTaskDelay —— 本回调跑在 LVGL 任务里，阻塞会拖垮渲染。
+                return;
             }
             esp_lcd_touch_point_data_t points[1] = {};
             uint8_t point_cnt = 0;

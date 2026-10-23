@@ -331,8 +331,23 @@ void HomeLcdDisplay::BuildInfoScreen() {
     }
     auto text_font = lvgl_theme->text_font();
     auto icon_font = lvgl_theme->icon_font();
-    if (text_font == nullptr || icon_font == nullptr) {
-        ESP_LOGE(TAG, "text/icon font is null, skip info screen");
+    // 只判 shared_ptr 非空不够：LvglCBinFont::font() 可能返回 NULL，而 LVGL 样式存的是
+    // 裸 lv_font_t*，一旦拿它设给标签，布局刷新时 lv_font_get_glyph_width 就会调空
+    // 函数指针把整机带崩（2026-10-23 真机 Guru Meditation PC=0x0）。这里连底层指针一起判。
+    if (text_font == nullptr || icon_font == nullptr || text_font->font() == nullptr ||
+        icon_font->font() == nullptr) {
+        ESP_LOGE(TAG, "info screen font invalid (text=%p icon=%p), skip info screen",
+                 text_font != nullptr ? text_font->font() : nullptr,
+                 icon_font != nullptr ? icon_font->font() : nullptr);
+        return;
+    }
+    // 关键：把字体对象的所有权留在本对象上，避免 SetTextFont() 换字体后旧对象被释放
+    // 而信息屏标签仍持有其裸指针（悬空 → 布局刷新调空函数指针 → 重启）。
+    info_text_font_ = text_font;
+    info_icon_font_ = icon_font;
+    // 星号：字体结构体在但字形回调为 NULL，一样会在布局时调空函数指针。
+    if (text_font->font()->get_glyph_dsc == nullptr || icon_font->font()->get_glyph_dsc == nullptr) {
+        ESP_LOGE(TAG, "FONT BROKEN: get_glyph_dsc is null, skip info screen");
         return;
     }
     lv_color_t text_color = lvgl_theme->text_color();
