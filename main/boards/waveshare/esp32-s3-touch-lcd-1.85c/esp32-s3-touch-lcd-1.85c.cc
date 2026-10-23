@@ -391,7 +391,11 @@ private:
         tp_io_config.lcd_cmd_bits = 8;
         tp_io_config.lcd_param_bits = 0;
         tp_io_config.flags.disable_control_phase = 1;
-        ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(i2c_bus_, &tp_io_config, &tp_io_handle));
+        esp_err_t tp_io_ret = esp_lcd_new_panel_io_i2c(i2c_bus_, &tp_io_config, &tp_io_handle);
+        if (tp_io_ret != ESP_OK) {
+            ESP_LOGE(TAG, "Touch I2C device add failed (%s), touch disabled", esp_err_to_name(tp_io_ret));
+            return;
+        }
 
         // 触摸坐标的 swap/mirror 及方向待真机验证（先按不 swap 试，反向再调 flags）。
         // rst 由 TCA9554 EXIO1 复位故设 NC；int 用 config.h 的真实引脚 TP_PIN_NUM_INT(GPIO4)。
@@ -410,7 +414,13 @@ private:
             .flags = {0, 0, 0},  // swap_xy/mirror_x/mirror_y 全 0，待真机校准
         };
         ESP_LOGI(TAG, "Initialize touch controller");
-        ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_cst816s(tp_io_handle, &tp_cfg, &tp_));
+        esp_err_t tp_ret = esp_lcd_touch_new_i2c_cst816s(tp_io_handle, &tp_cfg, &tp_);
+        if (tp_ret != ESP_OK) {
+            // 芯片不在线或 ID 读失败：放弃触摸，整机照常启动。
+            // 绝不让一个外设的初始化失败拖垮整机（2026-10-23 真机教训）。
+            ESP_LOGE(TAG, "CST816S init failed (%s), touch disabled", esp_err_to_name(tp_ret));
+            return;
+        }
 
         // 自建容错输入设备，替代 lvgl_port_add_touch：
         // 后者内部的 lvgl_port_touchpad_read 用 ESP_ERROR_CHECK(esp_lcd_touch_read_data(...))，

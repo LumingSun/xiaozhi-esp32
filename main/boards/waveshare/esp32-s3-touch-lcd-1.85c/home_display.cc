@@ -72,12 +72,15 @@ lv_style_transition_dsc_t g_value_fade_trans;
 const lv_style_prop_t kValueFadeProps[] = {LV_STYLE_OPA, LV_STYLE_PROP_INV};
 
 // 创建一个 ± 步进按钮（34x34，居中的 +/- 文本）。不需要 this，故为自由函数。
+// 注意：必须先设字体再设文本——反过来会在"文本已设但字体还是继承值"的窗口期内
+// 被布局刷新拿到空字体，lv_font_get_glyph_width 直接调空函数指针崩溃
+// （2026-10-23 真机 Guru Meditation: InstrFetchProhibited PC=0x0）。
 lv_obj_t* MakeStepButton(lv_obj_t* parent, const char* symbol, const lv_font_t* font) {
     lv_obj_t* btn = lv_btn_create(parent);
     lv_obj_set_size(btn, 34, 34);
     lv_obj_t* lbl = lv_label_create(btn);
-    lv_label_set_text(lbl, symbol);
     lv_obj_set_style_text_font(lbl, font, 0);
+    lv_label_set_text(lbl, symbol);
     lv_obj_center(lbl);
     return btn;
 }
@@ -102,7 +105,14 @@ HomeLcdDisplay::~HomeLcdDisplay() {
 
 void HomeLcdDisplay::SetupUI() {
     // 先跑父类 SetupUI()，完整创建主题/表情/状态栏/字幕等既有对象
+    // （父类内部自持 DisplayLockGuard，且 LcdDisplay 构造时已启动 LVGL 任务）
     SpiLcdDisplay::SetupUI();
+
+    // 以下 LVGL 操作必须持锁：LVGL 任务此刻已在运行，无锁并发创建/修改对象会让
+    // 布局刷新读到"半成品"对象（字体未设/子对象未挂上），曾导致真机
+    // Guru Meditation InstrFetchProhibited PC=0x0（2026-10-23）。
+    // lvgl_port_lock 是递归锁，BuildInfoScreen() 内部再加一层不会死锁。
+    DisplayLockGuard lock(this);
 
     // 全局按压捕获：息屏/信息屏下的任意点击都会沿父链冒泡到这里。
     lv_obj_add_event_cb(lv_screen_active(), screen_event_cb, LV_EVENT_PRESSED, this);
@@ -121,7 +131,12 @@ void HomeLcdDisplay::SetupUI() {
         .name = "home_val_fade",
         .skip_unhandled_events = false,
     };
-    ESP_ERROR_CHECK(esp_timer_create(&fade_args, &value_fade_timer_));
+    esp_err_t fade_ret = esp_timer_create(&fade_args, &value_fade_timer_);
+    if (fade_ret != ESP_OK) {
+        // 建不出来只损失"数值标签自动淡出"，不影响整机启动
+        ESP_LOGE(TAG, "value fade timer create failed (%s)", esp_err_to_name(fade_ret));
+        value_fade_timer_ = nullptr;
+    }
 
     // 天气获取任务（独立低优先级任务，阻塞仅限本任务）
     if (weather_task_ == nullptr) {
