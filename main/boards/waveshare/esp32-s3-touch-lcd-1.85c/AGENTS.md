@@ -52,22 +52,29 @@ lv_obj_set_style_text_font(lbl, info_text_font_->font(), 0);
 另外：**字体指针非 NULL ≠ 可用**。`font()->get_glyph_dsc` 也要判（`LvglCBinFont::font()`
 可能非空但回调为空）。`BuildInfoScreen()` 开头有两层校验 + fail-soft 跳过，勿删。
 
-### 2. 触摸当前不可用（已知问题）
+### 2. 触摸：CST816T 自动休眠（2026-10-23 已定位并修复）
 
-**现象**：`CST816S` 芯片 ID 能读到（`IC id: 181` = 0xB5），但数据寄存器 `0x02` 的读
-**100% NACK**，140 次/秒。因此探针式支持不了触摸。
+**根因**：本板触摸芯片 ID 是 **0xB5 = CST816T**（不是 CST816S 的 0xB4）。实测其
+`0xFE`(DisAutoSleep)=`0x00`、`0xF9`(autosleep time)=`0x00` —— **自动休眠是开的**。
+CST8xx 进入 auto-sleep 后**不再响应任何 I2C 读**（Zephyr `cst8xx` 驱动注释里也记录了
+这条行为），于是：上电复位后 ID 能读到，随后所有读（含 `0xA7` 芯片 ID）持续 NACK，
+140 次/秒。**和速率、长度、寄存器、信号完整性都无关**。
 
-**已排除**：`int_gpio_num` 配置（`GPIO_NUM_NC` 与 `TP_PIN_NUM_INT`=GPIO4 都试过）、
-I2C 总线共享（与 TCA9554/ES8311/ES7210 同总线）、上电复位时序（TCA9554 EXIO1 已正确
-复位）。
+**诊断实证**（2026-10-23，一次性诊断固件）：`0x00–0xFF` 全扫 256 次全部 OK → 空闲数百
+毫秒后再读全 NACK（100k 也 NACK）→ 写 `0xFE=0x01` 后 `0x02`/`0xA7` 立即恢复且不再失败。
 
-**下一个未验证怀疑**：I2C 400kHz 对本板触摸走线过快（1 字节 ID 读成功、6 字节数据读
-失败，符合信号完整性临界）。试法：`tp_io_config.scl_speed_hz` 改 `100 * 1000`。
+**修复**：`InitializeTouch()` 里驱动初始化后追加
 
-**现状**：`InitializeTouch()` 末尾有 `ESP_LOGW(...) + return;`，**故意不注册输入设备**
-（避免 140 次/秒失败事务刷屏 + 占 CPU）。触摸恢复后删掉这两行即可——下面是完整的
-**容错 indev**（绝不用 `ESP_ERROR_CHECK` 包读操作），不要退回 `lvgl_port_add_touch`
-（它内部的 `lvgl_port_touchpad_read` 用 `ESP_ERROR_CHECK` 包着读，一次 NACK 就 abort）。
+```cpp
+TouchWriteReg(tp_io_handle, 0xFE, 0x01);   // 必须！espressif 官方驱动不写这一位
+```
+
+并读回 `0xFE` 校验。读回调在持续 NACK 时会自动重写该寄存器自愈（写事务能到达睡死的
+芯片，这是唯一的唤醒手段）。
+
+**不要退回 `lvgl_port_add_touch`**：它内部的 `lvgl_port_touchpad_read` 用
+`ESP_ERROR_CHECK` 包着读，一次 NACK 就让整机 abort（2026-10-23 曾因此重启循环）。
+当前自建 indev 直接读 `0x02` 的 6 字节并手工解析（手指数/XY），读失败只当作"本次无触摸"。
 
 ### 3. I2C 拓扑（别踩错总线）
 
@@ -130,6 +137,24 @@ while time.time()<e:
   流式累计、64KB 上限）；结果通过 `Application::Schedule` 排到主任务再改 LVGL
   ——**这条路径勿改成直接在天气任务里改 UI**
 - 天气城市：`menuconfig → ESP32-S3-Touch-LCD-1.85C home variant → Weather city`
+
+### 7. 空闲状态机：状态栏时钟会重置空闲计时（信息屏不出）
+
+**（2026-10-23 真机定位，症状：等再久也进不了信息屏）**
+
+`LvglDisplay::UpdateStatusBar()` 由 `Application` 每秒调用一次，其中在**空闲态每分钟整点**
+会调 `display->SetStatus(当前时间)` 刷新状态栏时钟。而 `HomeLcdDisplay` 把
+`SetStatus/SetEmotion/SetChatMessage` 的"非空即活动"当作亮屏触发 → 空闲计时被每分钟重置，
+`kActiveToInfoMs`（60s）永远达成不了。实测 idle 每次涨到 ~55s 就被打回 0。
+
+**规则**：`SetStatus/SetEmotion/SetChatMessage` 只有处于**交互语境**时才亮屏/重置计时——
+判据是 `Application::GetInstance().GetDeviceState() != kDeviceStateIdle`
+（见 `home_display.cc` 的 `IsInteractiveContext()`）。空闲态下只接受
+**触摸（屏幕按压/音量亮度按钮）** 与 **语音（状态机切出 idle）** 作为唤醒来源。
+
+诊断手法（已固化经验）：在 `OnStateTick()` 里每 5s 打印 `state` + `idle`，在
+`WakeAndActivate()`/`OnUserActivity()` 入口打印调用来源（`SetStatus`/`SetEmotion`/
+`screen-press`…）。这次就是靠"来源=SetStatus 且间隔恰好 60s"一眼定位的。
 
 ## 验收（改完必做）
 

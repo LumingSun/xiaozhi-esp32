@@ -43,8 +43,8 @@ private:
     static void weather_task_entry(void* arg);        // 天气获取任务
 
     // 状态机动作（LVGL 任务内）
-    void OnUserActivity();   // 任意交互：重置空闲计时；ScreenOff 则唤醒回 Active
-    void WakeAndActivate();  // 亮屏 + 回 Active + 隐藏信息屏
+    void OnUserActivity(const char* why = "?");   // 任意交互：重置空闲计时；ScreenOff 则唤醒回 Active
+    void WakeAndActivate(const char* why = "?");  // 亮屏 + 回 Active + 隐藏信息屏
     void EnterInfo();        // Active -> Info
     void EnterScreenOff();   // Info -> ScreenOff
     void OnStateTick();      // 每秒检查空闲超时

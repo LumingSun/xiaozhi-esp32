@@ -218,6 +218,31 @@ static const st77916_lcd_init_cmd_t vendor_specific_init_new[] = {
     {0x29, (uint8_t []){0x00}, 1, 0},  
 };
 
+#ifdef CONFIG_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C_HOME
+// 触摸运行时状态。LVGL 读回调必须是无捕获 lambda（要转成函数指针），拿不到 this，
+// 故用文件级 static 传参。
+struct TouchRuntimeState {
+    esp_lcd_touch_handle_t tp = nullptr;
+    esp_lcd_panel_io_handle_t io = nullptr;
+    uint32_t ok = 0;
+    uint32_t fail = 0;
+    uint32_t rearmed = 0;
+    uint32_t logged_points = 0;
+    uint8_t raw[6] = {0};
+};
+static TouchRuntimeState s_touch_state;
+
+// 写单字节寄存器：disable_control_phase=1 时 tx_param 直接发 [reg][val]。
+// CST816 睡死后**写事务仍能到达**（诊断实证），这是唯一的唤醒手段。
+static esp_err_t TouchWriteReg(esp_lcd_panel_io_handle_t io, uint8_t reg, uint8_t val) {
+    return esp_lcd_panel_io_tx_param(io, reg, &val, 1);
+}
+
+// 关键寄存器：0xFE = DisAutoSleep（1=关闭自动休眠）。
+// 本板芯片出厂值 0xFE=0x00（自动休眠开启）+ 0xF9=0x00（休眠时间 0），进休眠后不再响应 I2C。
+static constexpr uint8_t kCst816RegDisAutoSleep = 0xFE;
+#endif
+
 class CustomBoard : public WifiBoard {
 private:
     Button boot_button_;
@@ -370,6 +395,7 @@ private:
     }
 
 #ifdef CONFIG_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C_HOME
+
     // 触摸接入（仅 home 变体）：复用 I2C0 总线（TCA9554 同总线）挂 CST816S，
     // 经 esp_lvgl_port 注册为 LVGL 输入设备（与固件的 LVGL 任务协作，勿手搓
     // lv_indev）。TP_RST 已由 InitializeTca9554()（EXIO1 复位）拉起，故 rst 设
@@ -422,43 +448,75 @@ private:
             return;
         }
 
-        // 触摸芯片数据寄存器读持续 NACK（每次启动数百次，寄存器 0x02），触摸不可用。
-        // 已排除：int 引脚配置（NC/GPIO4 都试过）、I2C 总线共享、上电复位时序
-        //（TCA9554 EXIO1 已正确复位，且芯片 ID 0xB5 能读到）。疑似本板触摸面板硬件问题。
-        // 暂不注册输入设备：避免 140 次/秒的失败 I2C 事务刷屏并浪费 CPU。
-        // 触摸恢复后删掉下面两行即可（自建容错 indev 的代码仍在）。
-        ESP_LOGW(TAG, "touch controller unresponsive (I2C NACK), touch disabled");
-        return;
+        // ---- 关键修复（2026-10-23 真机诊断定位）----
+        // 芯片 ID = 0xB5（CST816T，非 CST816S 的 0xB4）。实测其 0xFE(DisAutoSleep)=0x00、
+        // 0xF9(autosleep time)=0x00，即**自动休眠开启**。CST8xx 进入 auto-sleep 后不再响应
+        // I2C（Zephyr cst8xx 驱动注释同样记录此行为），现象是：上电复位后 ID 能读到，
+        // 随后所有读（含 0xA7 芯片 ID）持续 NACK，且与速率无关（100k 一样 NACK）。
+        // 诊断实证：0x00-0xFF 全扫 256 次全 OK → 空闲数百毫秒后全 NACK → 写 0xFE=0x01
+        // 后 0x02/0xA7 立即恢复且不再失败。espressif 官方驱动初始化不写这一位，故在此补上。
+        esp_err_t wake_ret = TouchWriteReg(tp_io_handle, kCst816RegDisAutoSleep, 0x01);
+        uint8_t dis_sleep = 0xFF;
+        esp_err_t rd_ret = esp_lcd_panel_io_rx_param(tp_io_handle, kCst816RegDisAutoSleep, &dis_sleep, 1);
+        if (wake_ret == ESP_OK && rd_ret == ESP_OK && dis_sleep == 0x01) {
+            ESP_LOGI(TAG, "CST816 auto-sleep disabled (0xFE=0x01)");
+        } else {
+            // 不阻塞启动：失败只降级为"可能反复睡死/自愈"，由读回调的 re-arm 兜底。
+            ESP_LOGW(TAG, "CST816 disable auto-sleep failed (write=%s read=%s val=0x%02X), self-heal armed",
+                     esp_err_to_name(wake_ret), esp_err_to_name(rd_ret), dis_sleep);
+        }
 
         // 自建容错输入设备，替代 lvgl_port_add_touch：
         // 后者内部的 lvgl_port_touchpad_read 用 ESP_ERROR_CHECK(esp_lcd_touch_read_data(...))，
         // 一次 I2C NACK 就让整机 abort。这里读失败只当作"本次无触摸"，绝不拖垮整机；
-        // 并重试一次以扛掉瞬时 NACK。最坏情况退化为无触摸，其余功能全部可用。
+        // 并在持续 NACK 时重写 DisAutoSleep 自愈（芯片睡死不响应读，但写总能到达）。
+        s_touch_state.tp = tp_;
+        s_touch_state.io = tp_io_handle;
         lvgl_port_lock(0);
         lv_indev_t *indev = lv_indev_create();
         lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
         lv_indev_set_read_cb(indev, [](lv_indev_t *drv, lv_indev_data_t *data) {
-            auto *tp = static_cast<esp_lcd_touch_handle_t>(lv_indev_get_user_data(drv));
+            TouchRuntimeState &st = s_touch_state;
             data->state = LV_INDEV_STATE_RELEASED;
             data->point.x = 0;
             data->point.y = 0;
-            if (tp == nullptr) {
+            if (st.tp == nullptr) {
                 return;
             }
-            esp_err_t ret = esp_lcd_touch_read_data(tp);
+            // 直接读 6 字节原始数据并手工解析（与 espressif 驱动内部做法一致），
+            // 好处：不经过驱动封装，任何手指都能原样打出 raw 字节，便于判定面板是否真的上报。
+            //   0x02: 手指数(低 4 位) | 0x03: X 高 4 位 | 0x04: X 低 8 位
+            //   0x05: Y 高 4 位     | 0x06: Y 低 8 位
+            esp_err_t ret = esp_lcd_panel_io_rx_param(st.io, 0x02, st.raw, sizeof(st.raw));
             if (ret != ESP_OK) {
-                // I2C 持续异常：本次当作无触摸，不 abort。
                 // 注意：绝不能在这里 vTaskDelay —— 本回调跑在 LVGL 任务里，阻塞会拖垮渲染。
+                st.fail++;
+                if (st.io != nullptr && (st.fail % 20) == 1) {
+                    TouchWriteReg(st.io, kCst816RegDisAutoSleep, 0x01);
+                    st.rearmed++;
+                    if (st.fail <= 21) {
+                        ESP_LOGW(TAG, "touch read NACK (#%u), re-armed auto-sleep (%s)",
+                                 (unsigned) st.fail, esp_err_to_name(ret));
+                    }
+                }
                 return;
             }
-            esp_lcd_touch_point_data_t points[1] = {};
-            uint8_t point_cnt = 0;
-            if (!esp_lcd_touch_get_data(tp, points, &point_cnt, 1) || point_cnt == 0) {
+            st.ok++;
+            uint8_t fingers = st.raw[0] & 0x0F;
+            if (fingers == 0) {
                 return;
             }
             data->state = LV_INDEV_STATE_PRESSED;
-            data->point.x = points[0].x;
-            data->point.y = points[0].y;
+            data->point.x = (uint16_t) (((st.raw[1] & 0x0F) << 8) | st.raw[2]);
+            data->point.y = (uint16_t) (((st.raw[3] & 0x0F) << 8) | st.raw[4]);
+            // 前 6 个点打日志：既是"触摸是否真的可用"的证据，也给坐标校准提供数据
+            // （当前 swap_xy/mirror 全 0，若方向不对按实测值调整 tp_cfg.flags）。
+            if (st.logged_points < 6) {
+                st.logged_points++;
+                ESP_LOGI(TAG, "touch point %u: x=%d y=%d raw=%02X %02X %02X %02X %02X %02X",
+                         (unsigned) st.logged_points, data->point.x, data->point.y, st.raw[0], st.raw[1],
+                         st.raw[2], st.raw[3], st.raw[4], st.raw[5]);
+            }
         });
         lv_indev_set_user_data(indev, tp_);
         lv_indev_set_display(indev, lv_display_get_default());

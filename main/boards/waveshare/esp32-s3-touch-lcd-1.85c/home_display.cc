@@ -159,7 +159,7 @@ void HomeLcdDisplay::SetupUI() {
 void HomeLcdDisplay::screen_event_cb(lv_event_t* e) {
     auto* self = static_cast<HomeLcdDisplay*>(lv_event_get_user_data(e));
     if (self != nullptr) {
-        self->OnUserActivity();
+        self->OnUserActivity("screen-press");
     }
 }
 
@@ -229,21 +229,25 @@ void HomeLcdDisplay::weather_task_entry(void* arg) {
 
 // ---- 状态机 ----
 
-void HomeLcdDisplay::OnUserActivity() {
+void HomeLcdDisplay::OnUserActivity(const char* why) {
     last_activity_ms_.store(NowMs());
+    // 排查"谁重置了空闲计时"时把日志级别开到 DEBUG：打印调用来源。
+    ESP_LOGD(TAG, "activity reset by [%s]", why);
     ScreenState s = state_.load();
     if (s == ScreenState::ScreenOff) {
-        WakeAndActivate();
+        WakeAndActivate(why);
     } else if (s == ScreenState::Info) {
         UpdateInfoClock();  // 用户正在看，顺手刷新时间
     }
     // Active：仅重置计时，保持在 Active。
 }
 
-void HomeLcdDisplay::WakeAndActivate() {
+void HomeLcdDisplay::WakeAndActivate(const char* why) {
     bool was_off = state_.load() == ScreenState::ScreenOff;
     state_.store(ScreenState::Active);
     last_activity_ms_.store(NowMs());
+    // 排查用：同上，DEBUG 级。
+    ESP_LOGD(TAG, "wake+activate by [%s]", why);
     {
         DisplayLockGuard lock(this);
         if (info_container_ != nullptr) {
@@ -553,7 +557,7 @@ void HomeLcdDisplay::ChangeVolume(int delta) {
     char buf[8];
     snprintf(buf, sizeof(buf), "%d", vol);
     ShowValueLabel(vol_value_label_, buf);
-    OnUserActivity();
+    OnUserActivity("volume-btn");
 }
 
 void HomeLcdDisplay::ChangeBrightness(int delta) {
@@ -572,7 +576,7 @@ void HomeLcdDisplay::ChangeBrightness(int delta) {
     char buf[8];
     snprintf(buf, sizeof(buf), "%d", b);
     ShowValueLabel(bright_value_label_, buf);
-    OnUserActivity();
+    OnUserActivity("brightness-btn");
 }
 
 // ---- 天气（独立任务）----
@@ -695,18 +699,28 @@ int64_t HomeLcdDisplay::NowMs() {
 
 // ---- 语音事件重写（先父类，再按需亮屏；防递归）----
 
+// 是否处于"真实交互"语境。**不能用「status/emotion/message 非空」当判据**：
+// LvglDisplay::UpdateStatusBar() 在空闲态每分钟整点都会调 SetStatus(当前时间) 刷新
+// 状态栏时钟。若把它也算作活动，空闲计时会被永久重置在 60s 以内，信息屏永远出不来
+// （2026-10-23 真机实测：idle 每次涨到 ~55s 就被 SetStatus 打回 0，60s 阈值永不达成）。
+// 空闲态 = 用户没在对话，此时只接受触摸（按压/音量亮度按钮）作为唤醒来源。
+static bool IsInteractiveContext() {
+    return Application::GetInstance().GetDeviceState() != kDeviceStateIdle;
+}
+
 void HomeLcdDisplay::SetStatus(const char* status) {
     SpiLcdDisplay::SetStatus(status);
-    if (!suppress_wake_ && status != nullptr && status[0] != '\0') {
-        WakeAndActivate();
+    if (!suppress_wake_ && status != nullptr && status[0] != '\0' && IsInteractiveContext()) {
+        WakeAndActivate("SetStatus");
     }
 }
 
 bool HomeLcdDisplay::SetEmotion(const char* emotion) {
     bool ret = SpiLcdDisplay::SetEmotion(emotion);
     // "sleepy" 表示正在入睡（SetPowerSaveMode(true) 内部会设置），不亮屏。
-    if (!suppress_wake_ && emotion != nullptr && strcmp(emotion, "sleepy") != 0) {
-        WakeAndActivate();
+    if (!suppress_wake_ && emotion != nullptr && strcmp(emotion, "sleepy") != 0 &&
+        IsInteractiveContext()) {
+        WakeAndActivate("SetEmotion");
     }
     return ret;
 }
@@ -714,8 +728,9 @@ bool HomeLcdDisplay::SetEmotion(const char* emotion) {
 void HomeLcdDisplay::SetChatMessage(const char* role, const char* content) {
     SpiLcdDisplay::SetChatMessage(role, content);
     // 空 content（如 SetPowerSaveMode 的 SetChatMessage("system","")）不亮屏。
-    if (!suppress_wake_ && content != nullptr && content[0] != '\0') {
-        WakeAndActivate();
+    // 空闲态下的内部推送（如状态栏时钟刷新）也不算用户活动，见 IsInteractiveContext()。
+    if (!suppress_wake_ && content != nullptr && content[0] != '\0' && IsInteractiveContext()) {
+        WakeAndActivate("SetChatMessage");
     }
 }
 
@@ -729,6 +744,6 @@ void HomeLcdDisplay::SetPowerSaveMode(bool on) {
     if (on) {
         EnterScreenOff();
     } else {
-        WakeAndActivate();
+        WakeAndActivate("SetPowerSaveMode");
     }
 }
