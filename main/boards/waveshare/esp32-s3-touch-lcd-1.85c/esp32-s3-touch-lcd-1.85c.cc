@@ -394,22 +394,59 @@ private:
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(i2c_bus_, &tp_io_config, &tp_io_handle));
 
         // 触摸坐标的 swap/mirror 及方向待真机验证（先按不 swap 试，反向再调 flags）。
+        // rst 由 TCA9554 EXIO1 复位故设 NC；int 用 config.h 的真实引脚 TP_PIN_NUM_INT(GPIO4)。
+        // 2026-10-23 真机教训：int 设成 NC 时 lvgl_port 轮询读 I2C 被 CST816 NACK，
+        // 而它用 ESP_ERROR_CHECK 包着这次读 → 整机 abort 重启循环。本仓库所有 CST816
+        // 板（1.83/1.54/C5-1.69…）都用真实 int 引脚，NC 是本板曾经的孤例。
         esp_lcd_touch_config_t tp_cfg = {
             .x_max = DISPLAY_WIDTH - 1,
             .y_max = DISPLAY_HEIGHT - 1,
-            .rst_gpio_num = GPIO_NUM_NC,  // TP_RST 已由 TCA9554 EXIO1 复位
-            .int_gpio_num = GPIO_NUM_NC,  // 轮询模式
-            .levels = {0, 0},
+            .rst_gpio_num = GPIO_NUM_NC,     // TP_RST 已由 TCA9554 EXIO1 复位
+            .int_gpio_num = TP_PIN_NUM_INT,  // config.h: GPIO_NUM_4
+            .levels = {
+                .reset = 0,
+                .interrupt = 0,
+            },
             .flags = {0, 0, 0},  // swap_xy/mirror_x/mirror_y 全 0，待真机校准
         };
         ESP_LOGI(TAG, "Initialize touch controller");
         ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_cst816s(tp_io_handle, &tp_cfg, &tp_));
 
-        lvgl_port_touch_cfg_t touch_cfg = {
-            .disp = lv_display_get_default(),
-            .handle = tp_,
-        };
-        lvgl_port_add_touch(&touch_cfg);
+        // 自建容错输入设备，替代 lvgl_port_add_touch：
+        // 后者内部的 lvgl_port_touchpad_read 用 ESP_ERROR_CHECK(esp_lcd_touch_read_data(...))，
+        // 一次 I2C NACK 就让整机 abort。这里读失败只当作"本次无触摸"，绝不拖垮整机；
+        // 并重试一次以扛掉瞬时 NACK。最坏情况退化为无触摸，其余功能全部可用。
+        lvgl_port_lock(0);
+        lv_indev_t *indev = lv_indev_create();
+        lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
+        lv_indev_set_read_cb(indev, [](lv_indev_t *drv, lv_indev_data_t *data) {
+            auto *tp = static_cast<esp_lcd_touch_handle_t>(lv_indev_get_user_data(drv));
+            data->state = LV_INDEV_STATE_RELEASED;
+            data->point.x = 0;
+            data->point.y = 0;
+            if (tp == nullptr) {
+                return;
+            }
+            esp_err_t ret = esp_lcd_touch_read_data(tp);
+            if (ret != ESP_OK) {
+                vTaskDelay(pdMS_TO_TICKS(2));  // 让出总线，重试一次
+                ret = esp_lcd_touch_read_data(tp);
+            }
+            if (ret != ESP_OK) {
+                return;  // I2C 持续异常：本次当作无触摸，不 abort
+            }
+            esp_lcd_touch_point_data_t points[1] = {};
+            uint8_t point_cnt = 0;
+            if (!esp_lcd_touch_get_data(tp, points, &point_cnt, 1) || point_cnt == 0) {
+                return;
+            }
+            data->state = LV_INDEV_STATE_PRESSED;
+            data->point.x = points[0].x;
+            data->point.y = points[0].y;
+        });
+        lv_indev_set_user_data(indev, tp_);
+        lv_indev_set_display(indev, lv_display_get_default());
+        lvgl_port_unlock();
         ESP_LOGI(TAG, "Touch panel initialized successfully");
     }
 #endif
