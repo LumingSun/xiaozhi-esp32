@@ -697,7 +697,10 @@ bool HomeLcdDisplay::FetchWeather() {
         if (status == 200) {
             // 流式累计 body（实测约 40KB，动态扩容，64KB 上限防跑飞）。
             body.reserve(16 * 1024);
-            char buf[kWeatherBufferSize];
+            // 上游 2026-11 起对项目自有代码施加 -Werror=frame-larger-than=1536，
+            // 原来 2KB 的栈缓冲让本函数帧达到 2560B 直接编译失败。循环本身就是
+            // 分段累加，读块缩小到 512B 不影响结果，也把帧压回上限内。
+            char buf[512];
             int total = 0;
             int n = 0;
             while (total < static_cast<int>(kWeatherMaxBody) &&
