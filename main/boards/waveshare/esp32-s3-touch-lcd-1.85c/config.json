@@ -9,7 +9,10 @@
         },
         {
             "name": "esp32-s3-touch-lcd-1.85c-home",
-            "sdkconfig_append": ["CONFIG_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C_HOME=y"]
+            "sdkconfig_append": [
+                "CONFIG_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C_HOME=y",
+                "CONFIG_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C_HOME_CITY=\"Beijing\""
+            ]
         }
     ]
 }

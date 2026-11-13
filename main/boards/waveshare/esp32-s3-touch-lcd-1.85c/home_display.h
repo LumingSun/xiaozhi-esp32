@@ -7,6 +7,7 @@
 #include <esp_timer.h>
 #include <lvgl.h>
 #include <string>
+#include <vector>
 
 class HomeLcdDisplay : public SpiLcdDisplay {
 public:
@@ -30,6 +31,15 @@ public:
     // 反悔亮屏（防递归）。
     void SetPowerSaveMode(bool on) override;
 
+    // 主题换字体时同步信息屏的局部样式。
+    // 信息屏标签用 lv_obj_set_style_text_font 设的是局部样式，不在 SetTheme 的重绑范围内；
+    // 不重设就会一直用建屏时（资产应用前）的 basic 字体 -> 缺"雨/湿/北京"等字形。
+    bool SetTextFont(std::shared_ptr<LvglFont> text_font) override;
+
+    // 供屏幕按钮调用（触摸入口）
+    void EnterInfo();       // Active -> Info
+    void EnterScreenOff();  // Info -> ScreenOff
+
 private:
     // 空闲三态：Active(表情+字幕) -> Info(信息屏) -> ScreenOff(息屏)。
     enum class ScreenState { Active, Info, ScreenOff };
@@ -45,8 +55,6 @@ private:
     // 状态机动作（LVGL 任务内）
     void OnUserActivity(const char* why = "?");   // 任意交互：重置空闲计时；ScreenOff 则唤醒回 Active
     void WakeAndActivate(const char* why = "?");  // 亮屏 + 回 Active + 隐藏信息屏
-    void EnterInfo();        // Active -> Info
-    void EnterScreenOff();   // Info -> ScreenOff
     void OnStateTick();      // 每秒检查空闲超时
 
     // 息屏/亮屏（背光，跨任务安全）
@@ -69,6 +77,16 @@ private:
     void ApplyWeather(const std::string& temp, const std::string& desc, const std::string& humid,
                       const std::string& region);
     static const char* WeatherCodeToZh(const char* code);
+    static std::string CityDisplayName(const std::string& raw);  // Beijing -> 北京
+
+    // 圆屏安全区：把超宽聊天气泡收进圆内（基类按整屏 85% 算宽，会溢出圆底）
+    void ClampChatBubbles();
+    void ApplyInfoFontStylesLocked();  // 已持 DisplayLockGuard 时调用
+    void OnInfoButtonClicked();        // 对话屏「信息屏」按钮
+    void OnSleepButtonClicked();       // 信息屏「息屏」按钮
+
+    static void info_button_cb(lv_event_t* e);
+    static void sleep_button_cb(lv_event_t* e);
 
     static int64_t NowMs();
 
@@ -90,6 +108,9 @@ private:
     // 这两个 shared_ptr 让旧字体活到本对象析构，彻底消除悬空。
     std::shared_ptr<LvglFont> info_text_font_;
     std::shared_ptr<LvglFont> info_icon_font_;
+    // 换字体时的安全网：保留最近几个旧字体对象，避免"漏刷某个局部样式"立刻悬空崩溃。
+    // 真正正确的做法仍是 ApplyInfoFontStylesLocked() 把每个局部样式都刷一遍。
+    std::vector<std::shared_ptr<LvglFont>> held_fonts_;
 
     // 信息屏 UI（info_container_ 覆盖在基础 UI 之上，Active/ScreenOff 时隐藏）
     lv_obj_t* info_container_ = nullptr;
@@ -97,6 +118,7 @@ private:
     lv_obj_t* time_label_ = nullptr;
     lv_obj_t* date_label_ = nullptr;
     lv_obj_t* weather_label_ = nullptr;
+    lv_obj_t* humid_label_ = nullptr;
     lv_obj_t* conn_label_ = nullptr;
     lv_obj_t* controls_bar_ = nullptr;
     lv_obj_t* vol_minus_btn_ = nullptr;
@@ -105,6 +127,12 @@ private:
     lv_obj_t* bright_plus_btn_ = nullptr;
     lv_obj_t* vol_value_label_ = nullptr;
     lv_obj_t* bright_value_label_ = nullptr;
+    lv_obj_t* sleep_btn_ = nullptr;
+    lv_obj_t* sleep_btn_label_ = nullptr;
+
+    // 对话屏右上角「信息屏」按钮（overlay 在基础 UI 之上）
+    lv_obj_t* info_btn_ = nullptr;
+    lv_obj_t* info_btn_label_ = nullptr;
 
     // 天气（成员仅在主任务访问：ApplyWeather 写、UpdateInfoWeather 读）
     void* weather_task_ = nullptr;

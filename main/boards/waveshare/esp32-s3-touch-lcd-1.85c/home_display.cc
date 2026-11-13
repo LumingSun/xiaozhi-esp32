@@ -41,6 +41,10 @@ constexpr int kWeatherBufferSize = 2048;              // esp_http_client 读缓�
 constexpr size_t kWeatherMaxBody = 64 * 1024;         // body 累计上限（实测约 40KB）
 constexpr int kVolumeStep = 10;                       // 音量步进
 constexpr int kBrightnessStep = 10;                   // 亮度步进
+constexpr int kChatPadX = 60;                         // 聊天区左右留白 -> 可视宽 240
+constexpr int kChatPadTop = 126;                      // 聊天区上留白（让出表情区）
+constexpr int kChatPadBottom = 60;                    // 聊天区下留白（避开圆底）
+constexpr int kChatBubbleMaxW = 224;                  // 气泡内文本最大宽 = 240 - 2*8
 constexpr int kValueFadeDelayMs = 1000;               // 数值显示 1s 后淡出
 constexpr int kValueFadeDurMs = 300;                  // 淡出时长
 constexpr int kWeatherTaskStack = 8192;               // 天气任务栈（字节）
@@ -117,7 +121,38 @@ void HomeLcdDisplay::SetupUI() {
     // 全局按压捕获：息屏/信息屏下的任意点击都会沿父链冒泡到这里。
     lv_obj_add_event_cb(lv_screen_active(), screen_event_cb, LV_EVENT_PRESSED, this);
 
+    // ---- 圆屏安全区改造（2026-10-23）----
+    // 基类按整屏 360 宽排布聊天区，圆屏底部收窄处会被弧形切掉。
+    // 这里把聊天区收进内切安全区：左右各留 60（可视宽 240）、上 126（让出表情区）、
+    // 下 60（避开底部圆弧）。气泡超宽由 ClampChatBubbles() 兜底。
+    if (content_ != nullptr) {
+        lv_obj_set_style_pad_left(content_, kChatPadX, 0);
+        lv_obj_set_style_pad_right(content_, kChatPadX, 0);
+        lv_obj_set_style_pad_top(content_, kChatPadTop, 0);
+        lv_obj_set_style_pad_bottom(content_, kChatPadBottom, 0);
+    }
+    if (emoji_image_ != nullptr) {
+        // 表情置顶，紧贴状态栏下方
+        lv_obj_align(emoji_image_, LV_ALIGN_TOP_MID, 0, 34);
+    }
     BuildInfoScreen();
+
+    // 对话屏右上角「信息屏」按钮（点击 = 中止播报并切到信息屏）。
+    // 放在 BuildInfoScreen() 之后：图标字体由信息屏捕获并持有（info_icon_font_），
+    // 局部样式字体必须有人持有所有权，否则换主题字体会悬空（板级 AGENTS §1）。
+    if (lv_screen_active() != nullptr && info_icon_font_ != nullptr &&
+        info_icon_font_->font() != nullptr) {
+        info_btn_ = lv_btn_create(lv_screen_active());
+        lv_obj_set_size(info_btn_, 36, 36);
+        lv_obj_set_style_radius(info_btn_, 10, 0);
+        lv_obj_align(info_btn_, LV_ALIGN_TOP_RIGHT, -46, 40);
+        lv_obj_set_style_bg_opa(info_btn_, LV_OPA_40, 0);
+        info_btn_label_ = lv_label_create(info_btn_);
+        lv_obj_set_style_text_font(info_btn_label_, info_icon_font_->font(), 0);
+        lv_label_set_text(info_btn_label_, MATERIAL_SYMBOLS_SCHEDULE);
+        lv_obj_center(info_btn_label_);
+        lv_obj_add_event_cb(info_btn_, info_button_cb, LV_EVENT_CLICKED, this);
+    }
 
     // 空闲状态机 tick
     last_activity_ms_.store(NowMs());
@@ -253,6 +288,9 @@ void HomeLcdDisplay::WakeAndActivate(const char* why) {
         if (info_container_ != nullptr) {
             lv_obj_add_flag(info_container_, LV_OBJ_FLAG_HIDDEN);
         }
+        if (info_btn_ != nullptr) {
+            lv_obj_remove_flag(info_btn_, LV_OBJ_FLAG_HIDDEN);
+        }
     }
     if (was_off) {
         WakeScreen();  // 仅息屏态才恢复背光，避免每次表情变化都重放渐变
@@ -266,6 +304,10 @@ void HomeLcdDisplay::EnterInfo() {
         if (info_container_ != nullptr) {
             lv_obj_remove_flag(info_container_, LV_OBJ_FLAG_HIDDEN);
             lv_obj_move_foreground(info_container_);
+        }
+        // 信息屏全屏覆盖，右上角「信息屏」按钮必须一起隐藏，否则会浮在上面
+        if (info_btn_ != nullptr) {
+            lv_obj_add_flag(info_btn_, LV_OBJ_FLAG_HIDDEN);
         }
     }
     UpdateInfoClock();       // LVGL 任务：取自 time()，无共享状态
@@ -285,6 +327,9 @@ void HomeLcdDisplay::EnterScreenOff() {
         DisplayLockGuard lock(this);
         if (info_container_ != nullptr) {
             lv_obj_add_flag(info_container_, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (info_btn_ != nullptr) {
+            lv_obj_add_flag(info_btn_, LV_OBJ_FLAG_HIDDEN);
         }
     }
     SleepScreen();
@@ -369,7 +414,7 @@ void HomeLcdDisplay::BuildInfoScreen() {
 
     // 主信息列：时间/日期/天气/连接，居中偏上。
     main_info_box_ = lv_obj_create(info_container_);
-    lv_obj_set_size(main_info_box_, lv_pct(90), LV_SIZE_CONTENT);
+    lv_obj_set_size(main_info_box_, lv_pct(72), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(main_info_box_, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(main_info_box_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
@@ -377,12 +422,16 @@ void HomeLcdDisplay::BuildInfoScreen() {
     lv_obj_set_style_border_width(main_info_box_, 0, 0);
     lv_obj_set_style_pad_all(main_info_box_, 0, 0);
     lv_obj_set_style_pad_gap(main_info_box_, 6, 0);
-    lv_obj_align(main_info_box_, LV_ALIGN_CENTER, 0, -24);
+    lv_obj_align(main_info_box_, LV_ALIGN_CENTER, 0, -34);
 
     auto make_info_label = [&](lv_obj_t* parent) {
         lv_obj_t* lbl = lv_label_create(parent);
         lv_obj_set_style_text_font(lbl, text_font->font(), 0);
         lv_obj_set_style_text_color(lbl, text_color, 0);
+        // 圆屏安全区：限制行宽 + 居中，长文本不会顶到圆弧外
+        lv_obj_set_width(lbl, lv_pct(100));
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
         return lbl;
     };
     time_label_ = make_info_label(main_info_box_);
@@ -391,6 +440,9 @@ void HomeLcdDisplay::BuildInfoScreen() {
     lv_label_set_text(date_label_, "");
     weather_label_ = make_info_label(main_info_box_);
     lv_label_set_text(weather_label_, "天气 --");
+    // 湿度单独一行：避免"城市 + 温度 + 天气 + 湿度"整行过长被圆屏裁切
+    humid_label_ = make_info_label(main_info_box_);
+    lv_label_set_text(humid_label_, "");
     conn_label_ = make_info_label(main_info_box_);
     lv_label_set_text(conn_label_, "");
 
@@ -451,6 +503,20 @@ void HomeLcdDisplay::BuildInfoScreen() {
     };
 
     build_group(MATERIAL_SYMBOLS_VOLUME_UP, &vol_minus_btn_, &vol_plus_btn_, &vol_value_label_);
+
+    // 中间：「息屏」按钮（触摸进入息屏；任意触摸屏幕再唤醒）
+    sleep_btn_ = lv_btn_create(controls_bar_);
+    lv_obj_set_size(sleep_btn_, 64, 40);
+    lv_obj_set_style_radius(sleep_btn_, 10, 0);
+    lv_obj_set_style_bg_opa(sleep_btn_, LV_OPA_40, 0);
+    lv_obj_set_style_text_font(sleep_btn_, text_font->font(), 0);
+    lv_obj_add_event_cb(sleep_btn_, sleep_button_cb, LV_EVENT_CLICKED, this);
+    sleep_btn_label_ = lv_label_create(sleep_btn_);
+    lv_obj_set_style_text_font(sleep_btn_label_, text_font->font(), 0);
+    lv_obj_set_style_text_color(sleep_btn_label_, text_color, 0);
+    lv_label_set_text(sleep_btn_label_, "息屏");
+    lv_obj_center(sleep_btn_label_);
+
     build_group(MATERIAL_SYMBOLS_BRIGHTNESS_6, &bright_minus_btn_, &bright_plus_btn_,
                 &bright_value_label_);
 }
@@ -509,20 +575,47 @@ void HomeLcdDisplay::UpdateInfoConnection() {
     }
 }
 
+std::string HomeLcdDisplay::CityDisplayName(const std::string& raw) {
+    static const struct {
+        const char* en;
+        const char* zh;
+    } kCityMap[] = {
+        {"Beijing", "北京"},   {"Shanghai", "上海"},  {"Shenzhen", "深圳"},
+        {"Hangzhou", "杭州"},  {"Guangzhou", "广州"}, {"Chengdu", "成都"},
+        {"Nanjing", "南京"},   {"Tianjin", "天津"},   {"Wuhan", "武汉"},
+    };
+    for (const auto& e : kCityMap) {
+        if (raw == e.en) {
+            return e.zh;
+        }
+    }
+    return raw;
+}
+
 void HomeLcdDisplay::UpdateInfoWeather() {
     if (weather_label_ == nullptr) {
         return;
     }
     DisplayLockGuard lock(this);
+    // 城市优先用 wttr.in 的 nearest_area（如 "Beijing"），拿不到则退回配置项。
+    std::string city = CityDisplayName(weather_region_);
+    if (city.empty()) {
+        city = CityDisplayName(CONFIG_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C_HOME_CITY);
+    }
+    // 拆两行：第 1 行城市+温度+天气，第 2 行湿度。单行过长会被圆屏裁切。
     char buf[96];
-    if (!weather_region_.empty()) {
-        snprintf(buf, sizeof(buf), "%s %s°C %s 湿度%s%%", weather_region_.c_str(),
-                 weather_temp_.c_str(), weather_desc_.c_str(), weather_humid_.c_str());
+    if (city.empty()) {
+        snprintf(buf, sizeof(buf), "%s°C %s", weather_temp_.c_str(), weather_desc_.c_str());
     } else {
-        snprintf(buf, sizeof(buf), "%s°C %s 湿度%s%%", weather_temp_.c_str(),
-                 weather_desc_.c_str(), weather_humid_.c_str());
+        snprintf(buf, sizeof(buf), "%s %s°C %s", city.c_str(), weather_temp_.c_str(),
+                 weather_desc_.c_str());
     }
     lv_label_set_text(weather_label_, buf);
+    if (humid_label_ != nullptr) {
+        char hb[32];
+        snprintf(hb, sizeof(hb), "湿度 %s%%", weather_humid_.c_str());
+        lv_label_set_text(humid_label_, hb);
+    }
 }
 
 void HomeLcdDisplay::ShowValueLabel(lv_obj_t* label, const char* text) {
@@ -727,10 +820,120 @@ bool HomeLcdDisplay::SetEmotion(const char* emotion) {
 
 void HomeLcdDisplay::SetChatMessage(const char* role, const char* content) {
     SpiLcdDisplay::SetChatMessage(role, content);
+    // 基类按整屏 85%（360*0.85-16=290px）算气泡宽，圆屏放不下；
+    // 这里把超宽气泡的文本宽收回到安全区宽度，长文本自动换行。
+    ClampChatBubbles();
     // 空 content（如 SetPowerSaveMode 的 SetChatMessage("system","")）不亮屏。
     // 空闲态下的内部推送（如状态栏时钟刷新）也不算用户活动，见 IsInteractiveContext()。
     if (!suppress_wake_ && content != nullptr && content[0] != '\0' && IsInteractiveContext()) {
         WakeAndActivate("SetChatMessage");
+    }
+}
+
+// ---- 圆屏布局 / 字体跟随 / 触摸按钮（2026-10-23 第二轮）----
+
+void HomeLcdDisplay::ClampChatBubbles() {
+    DisplayLockGuard lock(this);
+    if (content_ == nullptr) {
+        return;
+    }
+    for (uint32_t i = 0; i < lv_obj_get_child_cnt(content_); ++i) {
+        lv_obj_t* bubble = lv_obj_get_child(content_, i);
+        if (bubble == nullptr) {
+            continue;
+        }
+        for (uint32_t j = 0; j < lv_obj_get_child_cnt(bubble); ++j) {
+            lv_obj_t* child = lv_obj_get_child(bubble, j);
+            if (child == nullptr || !lv_obj_check_type(child, &lv_label_class)) {
+                continue;
+            }
+            if (lv_obj_get_width(child) > kChatBubbleMaxW) {
+                lv_obj_set_width(child, kChatBubbleMaxW);
+            }
+        }
+    }
+}
+
+void HomeLcdDisplay::ApplyInfoFontStylesLocked() {
+    if (info_text_font_ == nullptr || info_text_font_->font() == nullptr) {
+        return;
+    }
+    const lv_font_t* tf = info_text_font_->font();
+    lv_obj_t* labels[] = {time_label_,   date_label_,        weather_label_,
+                          humid_label_,  conn_label_,        vol_value_label_,
+                          bright_value_label_};
+    for (lv_obj_t* lbl : labels) {
+        if (lbl != nullptr) {
+            lv_obj_set_style_text_font(lbl, tf, 0);
+        }
+    }
+    // 音量/亮度 ± 按钮的文字是 MakeStepButton 里用局部样式设的字体，必须一起刷新，
+    // 否则旧字体一释放它们就悬空 → 布局刷新调空函数指针 → 整机重启（2026-10-23 实测）。
+    lv_obj_t* step_btns[] = {vol_minus_btn_, vol_plus_btn_, bright_minus_btn_, bright_plus_btn_};
+    for (lv_obj_t* btn : step_btns) {
+        if (btn != nullptr && lv_obj_get_child_cnt(btn) > 0) {
+            lv_obj_set_style_text_font(lv_obj_get_child(btn, 0), tf, 0);
+        }
+    }
+    if (sleep_btn_label_ != nullptr) {
+        lv_obj_set_style_text_font(sleep_btn_label_, tf, 0);
+    }
+    if (sleep_btn_ != nullptr) {
+        lv_obj_set_style_text_font(sleep_btn_, tf, 0);
+    }
+    // 图标标签用图标字体（与文本字体无关，但同样要校验字形回调非空）
+    if (info_icon_font_ != nullptr && info_icon_font_->font() != nullptr &&
+        info_icon_font_->font()->get_glyph_dsc != nullptr && info_btn_label_ != nullptr) {
+        lv_obj_set_style_text_font(info_btn_label_, info_icon_font_->font(), 0);
+    }
+}
+
+bool HomeLcdDisplay::SetTextFont(std::shared_ptr<LvglFont> text_font) {
+    // 先做与基类一致的校验：字体对象和字形回调都得在，否则不要把坏指针设进样式。
+    if (text_font == nullptr || text_font->font() == nullptr ||
+        text_font->font()->get_glyph_dsc == nullptr) {
+        return false;
+    }
+    if (!LvglDisplay::SetTextFont(text_font)) {
+        return false;
+    }
+    // 注意顺序：先把旧字体留在局部 shared_ptr 里，重设完局部样式再释放，
+    // 否则标签会在"旧字体已释放、新字体未设"的窗口里悬空。
+    auto previous_text = info_text_font_;
+    if (previous_text != nullptr) {
+        held_fonts_.push_back(previous_text);
+        if (held_fonts_.size() > 3) {
+            held_fonts_.erase(held_fonts_.begin());
+        }
+    }
+    info_text_font_ = text_font;
+    auto* theme = static_cast<LvglTheme*>(current_theme_);
+    if (theme != nullptr && theme->icon_font() != nullptr &&
+        theme->icon_font()->font() != nullptr) {
+        info_icon_font_ = theme->icon_font();
+    }
+    {
+        DisplayLockGuard lock(this);
+        ApplyInfoFontStylesLocked();
+    }
+    ESP_LOGI(TAG, "info screen font refreshed to theme text font");
+    return true;
+}
+
+void HomeLcdDisplay::info_button_cb(lv_event_t* e) {
+    auto* self = static_cast<HomeLcdDisplay*>(lv_event_get_user_data(e));
+    if (self != nullptr) {
+        // 触摸回调跑在 LVGL 任务：AbortSpeaking 是线程安全的（内部走协议/事件位）。
+        Application::GetInstance().AbortSpeaking(kAbortReasonNone);
+        self->OnUserActivity("info-btn");
+        self->EnterInfo();
+    }
+}
+
+void HomeLcdDisplay::sleep_button_cb(lv_event_t* e) {
+    auto* self = static_cast<HomeLcdDisplay*>(lv_event_get_user_data(e));
+    if (self != nullptr) {
+        self->EnterScreenOff();
     }
 }
 
